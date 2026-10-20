@@ -1,0 +1,36 @@
+cabal-version:      3.0
+
+name:               parseURL
+version:            0.1.0.0
+license:            MIT
+license-file:       LICENSE
+author:             Paul-Alexandre Deguilhen
+maintainer:         paul-alexandre.deguilhen@telecomnancy.eu
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+
+common shared
+    default-language: GHC2021
+    ghc-options:      -Wall
+    build-depends:    base >=4 && <5
+
+library
+    import:           shared
+    hs-source-dirs:   src
+    exposed-modules:  Parse, URL
+    -- other-modules:  Internal.Helpers   -- modules used internally, not visible to users
+    build-depends:    bytestring, utf8-string
+
+executable myapp
+    import:           shared
+    hs-source-dirs:   app
+    main-is:          Main.hs
+    build-depends:    parseURL
+
+test-suite tests
+    import:           shared
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    build-depends:    parseURL
+                    , QuickCheck
