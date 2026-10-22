@@ -17,7 +17,7 @@ common shared
 library
     import:           shared
     hs-source-dirs:   src
-    exposed-modules:  Parse, URL
+    exposed-modules:  Parse, URL, Filter
     -- other-modules:  Internal.Helpers   -- modules used internally, not visible to users
     build-depends:    bytestring, utf8-string
 
