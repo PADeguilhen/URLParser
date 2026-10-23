@@ -9,10 +9,7 @@ import Data.Char (isAlphaNum)
 
 data SchemaFilter = SCHEMA Schema | STAR_SCHEMA
 
-data FullDomainFilter = FullDomainFilter {
-    anyStar :: Bool,
-    domainFilter :: DomainFilter
-}
+data FullDomainFilter = WILDCARD_DOMAIN_FILTER [DomainFilterSegment] | DOMAIN_FILTER DomainFilter
 
 data DomainFilter = DomainFilter {
     domFilter :: DomainFilterSegment,
@@ -34,8 +31,8 @@ instance Show SchemaFilter where
     show STAR_SCHEMA = "*"
 
 instance Show FullDomainFilter where
-    show FullDomainFilter {anyStar = True, domainFilter} = "**." ++ show domainFilter
-    show FullDomainFilter {anyStar = False, domainFilter} = show domainFilter
+    show (WILDCARD_DOMAIN_FILTER domainFilterSegments) = "**." ++ intercalate "." (map show domainFilterSegments)
+    show (DOMAIN_FILTER domainFilter) = show domainFilter
 
 instance Show DomainFilter where
     show DomainFilter {domFilter, subDomFilter, segments = []} = show subDomFilter ++ "." ++ show domFilter
@@ -47,7 +44,6 @@ instance Show DomainFilterSegment where
 
 instance Show Filter where
     show Filter {schemaFilter, fullDomainFilter} = show schemaFilter ++ "://" ++ show fullDomainFilter
-
 
 -- Parsing
 
@@ -65,13 +61,16 @@ parseSchemaFilter = (string "https" >>| \_ -> SCHEMA HTTPS)
 
 parseFullDomainFilter :: Parser FullDomainFilter
 parseFullDomainFilter =
-        (string "**." *> (FullDomainFilter True <$> parseDomainFilter))
-    <|> (FullDomainFilter False <$> parseDomainFilter)
+        (string "**" *> (WILDCARD_DOMAIN_FILTER <$> (string "." *> parseListDomainFilter <|> pure [])))
+    <|> (DOMAIN_FILTER <$> parseDomainFilter)
 
 
 parseSegment :: Parser DomainFilterSegment
 parseSegment = (string "*" >>| \_ -> STAR_DOMAIN)
            <|> (take_while1 isAlphaNum >>| SEGMENT)
+
+parseListDomainFilter :: Parser [DomainFilterSegment]
+parseListDomainFilter = sep_by (string ".") parseSegment
 
 parseDomainFilter :: Parser DomainFilter
 parseDomainFilter = sep_by (string ".") parseSegment >>= \lstD ->
@@ -89,15 +88,32 @@ filterSchema :: SchemaFilter -> Schema -> Bool
 filterSchema STAR_SCHEMA _ = True
 filterSchema (SCHEMA schemaFilter) schema = schemaFilter == schema
 
-filterDomain :: FullDomainFilter -> Domain -> Bool
-filterDomain fullDomainFilter domain = undefined
+convertDomain :: Domain -> [String]
+convertDomain domain = (tdl domain) : (sdl domain) : (reverse (subDomain domain))
 
--- data Domain = Domain
---   -- We shouldn't be able to have empty strings. Whatever ...
---   { tdl :: String
---   , sdl :: String
---   , subDomain :: [String] -- Only the TDL & SDL are mandatory
---   } deriving Eq
+convertDomainFilter :: DomainFilter -> [DomainFilterSegment]
+convertDomainFilter domain = (domFilter domain) : (subDomFilter domain) : (reverse (segments domain))
+
+filterDomain :: FullDomainFilter -> Domain -> Bool
+filterDomain (WILDCARD_DOMAIN_FILTER domainsFilter) domains = matchListSegments (reverse domainsFilter) (convertDomain domains) True
+filterDomain (DOMAIN_FILTER domainsFilter) domains = matchListSegments (convertDomainFilter domainsFilter) (convertDomain domains) False
+
+matchSegment :: DomainFilterSegment -> String -> Bool
+matchSegment STAR_DOMAIN _ = True
+matchSegment (SEGMENT s1) s2 = s1 == s2
+
+matchListSegments :: [DomainFilterSegment] -> [String] -> Bool -> Bool
+matchListSegments domainFilterSegments domainsSegments wildcard = case (domainFilterSegments, domainsSegments) of
+    ([], []) -> True
+    ([], _) -> wildcard
+    (_, []) -> False
+    (d1 : q1, d2 : q2) -> matchSegment d1 d2 && matchListSegments q1 q2 wildcard
 
 filterURL :: Filter -> URL -> Bool
 filterURL filtre url = filterSchema (schemaFilter filtre) (schema url) && filterDomain (fullDomainFilter filtre) (domain url)
+
+filterURLString :: String -> String -> Bool
+filterURLString filterStr urlStr =
+    case (parseStr parseFilter filterStr, parseStr parseURL urlStr) of
+        (Right filterParsed, Right urlParsed) -> filterURL filterParsed urlParsed
+        _ -> False
