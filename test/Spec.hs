@@ -4,8 +4,10 @@ import Control.Monad (unless)
 import System.Exit (exitFailure)
 import Test.QuickCheck
 
+import Data.List (intercalate)
 import Parse (Parser, ResultState (..), fromString, parse, pos)
 import URL
+import Filter
 
 ------------------------------------------------------------------------
 -- Generators (yours, unchanged)
@@ -20,8 +22,18 @@ genAlphaWithLength :: (Int, Int) -> Gen String
 genAlphaWithLength lenRange =
   listWithLength lenRange (elements ['a'..'z'])
 
+genAlphaOrStarWithLength :: (Int, Int) -> Gen String
+genAlphaOrStarWithLength lenRange =
+  frequency [
+    (1, return "*"),
+    (3, listWithLength lenRange (elements ['a'..'z']))
+  ]
+
 genSchemeStr :: Gen String
 genSchemeStr = elements ["http", "https", "ftp", "ssh"]
+
+genSchemeFilterStr :: Gen String
+genSchemeFilterStr = elements ["http", "https", "ftp", "ssh", "*"]
 
 genDomainNameStr :: Gen String
 genDomainNameStr = do
@@ -33,6 +45,29 @@ genDomainNameStr = do
     ]
   let subdomainsString = foldr (\sub acc -> acc ++ sub ++ ".") "" subdomains
   return $ subdomainsString ++ sld ++ "." ++ tld
+
+genDomainNameFilterStr :: Gen String
+genDomainNameFilterStr = frequency [
+    (3, do
+      tld <- genAlphaOrStarWithLength (2, 4)
+      sld <- genAlphaOrStarWithLength (2, 10)
+      subdomains <- frequency [
+          (3, return []),
+          (1, listWithLength (1, 5) $ genAlphaOrStarWithLength (2, 10))
+        ]
+      let subdomainsString = intercalate "." subdomains
+      if null subdomainsString then
+        return $  sld ++ "." ++ tld
+      else
+        return $ subdomainsString ++ "." ++ sld ++ "." ++ tld),
+    (1, do
+      subdomains <- frequency [
+          (3, return []),
+          (1, listWithLength (1, 5) $ genAlphaOrStarWithLength (2, 10))
+        ]
+      let subdomainsString = intercalate "." subdomains
+      return $ "**." ++ subdomainsString)
+  ]
 
 genPathStr :: Gen String
 genPathStr = frequency [
@@ -73,6 +108,12 @@ genUrlStr = do
   fragmentStr <- genFragmentStr
   return $ schemeStr ++ "://" ++ domainStr ++ pathStr ++ requestStr ++ fragmentStr
 
+genFilterStr :: Gen String
+genFilterStr = do
+  schemeStr <- genSchemeFilterStr
+  domainStr <- genDomainNameFilterStr
+  return $ schemeStr ++ "://" ++ domainStr
+
 ------------------------------------------------------------------------
 -- Helpers
 ------------------------------------------------------------------------
@@ -101,6 +142,13 @@ expectedSchema "https" = HTTPS
 expectedSchema "ftp"   = FTP
 expectedSchema other   = ETC other
 
+expectedSchemaFilter :: String -> SchemaFilter
+expectedSchemaFilter "http" = SCHEMA HTTP
+expectedSchemaFilter "https" = SCHEMA HTTPS
+expectedSchemaFilter "ftp" = SCHEMA FTP
+expectedSchemaFilter "*" = STAR_SCHEMA
+expectedSchemaFilter other = SCHEMA (ETC other)
+
 -- "a.b.example.com" -> tdl "com", sdl "example", subDomain ["a","b"]
 -- (subdomains kept in the order they are written)
 expectedDomain :: String -> Domain
@@ -111,6 +159,23 @@ expectedDomain s =
             , sdl       = labels !! (n - 2)
             , subDomain = take (n - 2) labels
             }
+
+convertStringToSegment :: String -> DomainFilterSegment
+convertStringToSegment "*" = STAR_DOMAIN
+convertStringToSegment s = SEGMENT s
+
+expectedDomainFilter :: String -> FullDomainFilter
+expectedDomainFilter s =
+  let labels = splitOn '.' s
+  in if labels !! 0 == "**"
+       then WILDCARD_DOMAIN_FILTER (map convertStringToSegment (filter (not . null) (drop 1 labels)))
+       else
+         let n = length labels
+         in DOMAIN_FILTER ( DomainFilter {
+                   domFilter  = convertStringToSegment (labels !! (n - 1))
+                 , subDomFilter = convertStringToSegment (labels !! (n - 2))
+                 , segments = map convertStringToSegment (take (n - 2) labels)
+                 })
 
 -- "/a/b" -> ["a","b"], "" -> []
 expectedPath :: String -> [String]
@@ -191,6 +256,34 @@ prop_urlFields =
            }
 
 ------------------------------------------------------------------------
+-- Properties: whole filters
+------------------------------------------------------------------------
+
+-- Every generated URL is accepted and fully consumed.
+prop_filterAccepted :: Property
+prop_filterAccepted = forAll genFilterStr $ \s ->
+  counterexample ("input: " ++ show s) $
+    case parseAll parseFilter s of
+      Just _  -> property True
+      Nothing -> property False
+
+-- Each part of the URL ends up in the right field.
+prop_filterFields :: Property
+prop_filterFields =
+  forAll genSchemeFilterStr     $ \sc ->
+  forAll genDomainNameFilterStr $ \d  ->
+    let s = sc ++ "://" ++ d
+        parsed = parseAll parseFilter s
+    in counterexample ("input: " ++ show s) $
+        conjoin [
+         (parsed === Just Filter
+            { schemaFilter     = expectedSchemaFilter sc
+            , fullDomainFilter = expectedDomainFilter d
+            }),
+         counterexample "round trip failed"
+           (fmap show parsed === Just s)]
+
+------------------------------------------------------------------------
 -- Hand-written examples (edge cases the generators don't cover)
 ------------------------------------------------------------------------
 
@@ -239,6 +332,53 @@ prop_rejects = conjoin
         isNothing' _       = False
 
 ------------------------------------------------------------------------
+-- Test the filtering
+------------------------------------------------------------------------
+
+prop_rejects_filter :: Property
+prop_rejects_filter = conjoin
+  [ counterexample ("should reject " ++ show s) (isNothing' (parseAll parseFilter s))
+  | s <- [ ""
+         , "http//example.com"     -- missing ':'
+         , "http:/example.com"     -- missing one '/'
+         , "://example.com"        -- missing scheme
+         , "http://com"            -- no second-level domain
+         , "http://example."       -- empty TLD
+         , "**://example.com"      -- ** on the schema
+         , "http://example.**.com" -- ** not on the left
+         ]
+  ]
+  where isNothing' Nothing = True
+        isNothing' _       = False
+
+prop_accepts_filtering :: Property
+prop_accepts_filtering = conjoin
+  [ counterexample (show filters ++ " should accept " ++ show urls)
+      (filterURLString filters urls)
+  | (filters, urls) <- [
+        ("http://example.com", "http://example.com")
+      , ("https://example.com", "https://example.com")
+      , ("*://example.com", "https://example.com")
+      , ("https://*.com", "https://example.com")
+      , ("https://*.*", "https://example.com")
+      , ("https://**.com", "https://example.com")
+      , ("*://**", "https://example.com")
+      , ("https://*.google.com", "https://www.google.com")
+      ]
+  ]
+
+prop_rejects_filtering :: Property
+prop_rejects_filtering = conjoin
+  [ counterexample (show filters ++ " should reject " ++ show urls)
+      (not (filterURLString filters urls))
+  | (filters, urls) <- [
+        ("https://example.com", "http://example.com")
+      , ("https://example.fr", "https://example.com")
+      , ("*://*.example.com", "https://example.com")
+      ]
+  ]
+
+------------------------------------------------------------------------
 -- Runner
 ------------------------------------------------------------------------
 
@@ -256,6 +396,11 @@ main = do
     , check "example: https"        prop_exampleHttpsNotHttp
     , check "example: minimal"      prop_exampleMinimal
     , check "rejects bad input"     prop_rejects
+    , check "filter accepted"       prop_filterAccepted
+    , check "filter fields"         prop_filterFields
+    , check "reject filter parsing" prop_rejects_filter
+    , check "accept filtering"      prop_accepts_filtering
+    , check "reject filtering"      prop_rejects_filtering
     ]
   let failed = length (filter not results)
   unless (failed == 0) $ do

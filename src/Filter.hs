@@ -7,22 +7,22 @@ import Data.Char (isAlphaNum)
 
 -- Data
 
-data SchemaFilter = SCHEMA Schema | STAR_SCHEMA
+data SchemaFilter = SCHEMA Schema | STAR_SCHEMA deriving Eq
 
-data FullDomainFilter = WILDCARD_DOMAIN_FILTER [DomainFilterSegment] | DOMAIN_FILTER DomainFilter
+data FullDomainFilter = WILDCARD_DOMAIN_FILTER [DomainFilterSegment] | DOMAIN_FILTER DomainFilter deriving Eq
 
 data DomainFilter = DomainFilter {
     domFilter :: DomainFilterSegment,
     subDomFilter :: DomainFilterSegment,
     segments :: [DomainFilterSegment]
-}
+} deriving Eq
 
-data DomainFilterSegment = STAR_DOMAIN | SEGMENT String
+data DomainFilterSegment = STAR_DOMAIN | SEGMENT String deriving Eq
 
 data Filter = Filter {
     schemaFilter :: SchemaFilter,
     fullDomainFilter :: FullDomainFilter
-}
+} deriving Eq
 
 -- Show
 
